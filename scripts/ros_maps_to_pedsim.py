@@ -139,8 +139,8 @@ def scenario_from_map(map_image, map_metadata, use_map_origin=False):
     y_min = np.maximum(0, y_free[0]-1)
     y_max = np.minimum(sz[1], y_free[-1]+2)
 
-    for x in xrange(x_min, x_max):
-        for y in xrange(y_min, y_max):
+    for x in range(x_min, x_max):
+        for y in range(y_min, y_max):
             is_free = map_binary[x, y]
             window = get_window(map_binary, x, y)
             if ~is_free and np.any(window) and np.any(~window):
