@@ -1,9 +1,8 @@
-#!/usr/bin/env python
+import rclpy
+from rclpy.node import Node
 
-import rospy
 import yaml
 import os.path
-
 import numpy as np
 import xml.etree.ElementTree as xml
 import skimage.io as io
@@ -29,9 +28,8 @@ def get_window(image, x, y):
     """
     sz = image.shape
     assert (
-        x >= 0 and x < sz[0] and y >= 0 and y < sz[1]
-    ), "Pixel indeces out of image bounds (%d, %d)" % (x, y)
-
+        0 <= x < sz[0] and 0 <= y < sz[1]
+    ), f"Pixel indices out of image bounds ({x}, {y})"
     x_min = np.maximum(0, x - 1)
     x_max = np.minimum(sz[0], x + 2)
     y_min = np.maximum(0, y - 1)
@@ -70,13 +68,13 @@ def add_waypoints_and_agent(scenario, agents_info):
         w = waypoints[id]
         add_waypoint(scenario, id, w[0], w[1], w[2])
 
-    agents_keys = agents_info.keys()
+    agents_keys = list(agents_info.keys())
     agents_keys.remove("waypoints")
     for key in agents_keys:
         agent = agents_info[key]
-        agent_dx = agent["dx"] if "dx" in agent else 0.5
-        agent_dy = agent["dy"] if "dy" in agent else 0.5
-        agent_type = agent["type"] if "type" in agent else 1
+        agent_dx = agent.get("dx", 0.5)
+        agent_dy = agent.get("dy", 0.5)
+        agent_type = agent.get("type", 1)
         add_agent(
             scenario,
             agent["x"],
@@ -135,7 +133,7 @@ def scenario_from_map(map_image, map_metadata, use_map_origin=False):
 
     # ROS maps have white (255) as free space for visualization, colors need to
     # be inverted before comparing with thresholds (if negate == 0)
-    if ~negate:
+    if not negate:
         map_binary = 255 - map_image < free_thresh
     else:
         map_binary = map_image < free_thresh
@@ -153,11 +151,11 @@ def scenario_from_map(map_image, map_metadata, use_map_origin=False):
     y_min = np.maximum(0, y_free[0] - 1)
     y_max = np.minimum(sz[1], y_free[-1] + 2)
 
-    for x in xrange(x_min, x_max):
-        for y in xrange(y_min, y_max):
+    for x in range(x_min, x_max):
+        for y in range(y_min, y_max):
             is_free = map_binary[x, y]
             window = get_window(map_binary, x, y)
-            if ~is_free and np.any(window) and np.any(~window):
+            if not is_free and np.any(window) and np.any(~window):
                 # conversion between world coordinates and pixel coordinates
                 # (x and y coordinates are inverted, and y is also flipped)
                 world_x = origin[0] + y * resolution
@@ -177,39 +175,60 @@ def write_xml(tree, file_path, indent="  "):
         f.write(indented_xml)
 
 
+class MapToPedsimNode(Node):
+    def __init__(self):
+        super().__init__("ros_maps_to_pedsim")
+
+        self.declare_parameter("map_path", ".")
+        self.declare_parameter("map_name", "map.yaml")
+        self.declare_parameter("scenario_path", ".")
+        self.declare_parameter("scenario_name", "scene.xml")
+        self.declare_parameter("use_map_origin", False)
+        self.declare_parameter("add_agents", True)
+        self.declare_parameter("agents_info_path", ".")
+        self.declare_parameter("agents_info_name", "agents.yaml")
+
+        map_path = self.get_parameter("map_path").value
+        map_name = self.get_parameter("map_name").value
+        scenario_path = self.get_parameter("scenario_path").value
+        scenario_name = self.get_parameter("scenario_name").value
+        use_map_origin = self.get_parameter("use_map_origin").value
+        add_agents = self.get_parameter("add_agents").value
+        agents_info_path = self.get_parameter("agents_info_path").value
+        agents_info_name = self.get_parameter("agents_info_name").value
+
+        with open(os.path.join(map_path, map_name)) as file:
+            map_metadata = yaml.safe_load(file)
+
+        map_image = io.imread(os.path.join(map_path, map_metadata["image"]))
+
+        self.get_logger().info(f"Loaded map: {os.path.join(map_path, map_name)}")
+        self.get_logger().info(f"Map metadata: {map_metadata}")
+
+        scenario, map_walls = scenario_from_map(map_image, map_metadata, use_map_origin)
+
+        # uncomment for a visualization of where the obstacles have been placed
+        # io.imsave(os.path.join(scenario_path, 'walls.png'), map_walls*255)
+
+        if add_agents:
+            with open(os.path.join(agents_info_path, agents_info_name)) as file:
+                agents_info = yaml.safe_load(file)
+                self.get_logger().info(f"Agents info: {agents_info}")
+            add_waypoints_and_agent(scenario, agents_info)
+
+        self.get_logger().info(
+            f"Writing scenario to {os.path.join(scenario_path, scenario_name)}"
+        )
+        write_xml(scenario, os.path.join(scenario_path, scenario_name))
+        self.get_logger().info("Done.")
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = MapToPedsimNode()
+    node.destroy_node()
+    rclpy.shutdown()
+
+
 if __name__ == "__main__":
-    rospy.init_node("ros_maps_to_pedsim", anonymous=True)
-
-    map_path = rospy.get_param("~map_path", ".")
-    map_name = rospy.get_param("~map_name", "map.yaml")
-    scenario_path = rospy.get_param("~scenario_path", ".")
-    scenario_name = rospy.get_param("~scenario_name", "scene.xml")
-    use_map_origin = rospy.get_param("~use_map_origin", False)
-    add_agents = rospy.get_param("~add_agents", True)
-    agents_info_path = rospy.get_param("~agents_info_path", ".")
-    agents_info_name = rospy.get_param("~agents_info_name", "agents.yaml")
-
-    with open(os.path.join(map_path, map_name)) as file:
-        map_metadata = yaml.safe_load(file)
-
-    map_image = io.imread(os.path.join(map_path, map_metadata["image"]))
-
-    print("Loaded map in " + os.path.join(map_path, map_name) + " with metadata:")
-    print(map_metadata)
-
-    scenario, map_walls = scenario_from_map(map_image, map_metadata, use_map_origin)
-
-    # uncomment for a visualization of where the obstacles have been placed
-    # io.imsave(os.path.join(scenario_path, 'walls.png'), map_walls*255)
-
-    if add_agents:
-        with open(os.path.join(agents_info_path, agents_info_name)) as file:
-            agents_info = yaml.safe_load(file)
-            print(agents_info)
-        add_waypoints_and_agent(scenario, agents_info)
-
-    print("Writing scene in " + os.path.join(scenario_path, scenario_name) + "...")
-
-    write_xml(scenario, os.path.join(scenario_path, scenario_name))
-
-    print("Done.")
+    main()
